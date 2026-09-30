@@ -219,9 +219,6 @@ describe("buildTurnStartParams", () => {
       threadId: "provider-thread-1",
       approvalPolicy: "never",
       approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "dangerFullAccess",
-      },
       input: [
         {
           type: "text",
@@ -266,9 +263,6 @@ describe("buildTurnStartParams", () => {
       threadId: "provider-thread-1",
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "workspaceWrite",
-      },
       input: [
         {
           type: "text",
@@ -343,9 +337,6 @@ describe("buildTurnStartParams", () => {
         threadId: "provider-thread-1",
         approvalPolicy: "on-request",
         approvalsReviewer: "auto_review",
-        sandboxPolicy: {
-          type: "workspaceWrite",
-        },
         input: [
           {
             type: "text",
@@ -369,9 +360,6 @@ describe("buildTurnStartParams", () => {
       threadId: "provider-thread-1",
       approvalPolicy: "untrusted",
       approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "readOnly",
-      },
       input: [
         {
           type: "text",
@@ -380,6 +368,35 @@ describe("buildTurnStartParams", () => {
       ],
     });
   });
+
+  // Regression for #13987: re-asserting the runtime mode per turn replaced the
+  // thread sandbox policy, silently dropping Codex config such as
+  // `sandbox_workspace_write.network_access=true` from the launch arguments.
+  it.effect("does not override the thread sandbox policy on each turn", () =>
+    Effect.gen(function* () {
+      const sandboxedModes = ["auto", "approval-required"] as const;
+
+      for (const runtimeMode of sandboxedModes) {
+        const params = yield* buildTurnStartParams({
+          threadId: "provider-thread-1",
+          runtimeMode,
+          prompt: "Go",
+        });
+
+        NodeAssert.deepStrictEqual(params, {
+          threadId: "provider-thread-1",
+          approvalPolicy: runtimeMode === "auto" ? "on-request" : "untrusted",
+          approvalsReviewer: runtimeMode === "auto" ? "auto_review" : "user",
+          input: [
+            {
+              type: "text",
+              text: "Go",
+            },
+          ],
+        });
+      }
+    }),
+  );
 });
 
 describe("Codex MCP elicitation approvals", () => {

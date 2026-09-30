@@ -565,27 +565,6 @@ function buildThreadStartParams(input: {
   };
 }
 
-function runtimeModeToTurnSandboxPolicy(
-  input: RuntimeMode,
-): EffectCodexSchema.V2TurnStartParams__SandboxPolicy {
-  switch (input) {
-    case "approval-required":
-      return {
-        type: "readOnly",
-      };
-    case "auto-accept-edits":
-    case "auto":
-      return {
-        type: "workspaceWrite",
-      };
-    case "full-access":
-    default:
-      return {
-        type: "dangerFullAccess",
-      };
-  }
-}
-
 function buildCodexTurnInstructions(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
@@ -663,7 +642,6 @@ export function buildTurnStartParams(input: {
     input: turnInput,
     approvalPolicy: config.approvalPolicy,
     approvalsReviewer: config.approvalsReviewer,
-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
