@@ -1102,6 +1102,138 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         );
       });
 
+      describe("Grok model inventories", () => {
+        const cachedProvider = {
+          instanceId: ProviderInstanceId.make("grok-personal"),
+          driver: ProviderDriverKind.make("grok"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-09-04T19:00:00.000Z",
+          version: "0.4.2",
+          models: [
+            "grok-4",
+            "grok-4-fast",
+            "grok-code-fast-1",
+            "grok-3-mini",
+            "codexhub-removed-model",
+            "codexhub-stale-gateway-model",
+            "codexhub-legacy-model",
+          ].map((slug) => ({ slug, name: slug, isCustom: false, capabilities: null })),
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider;
+        const customModel = {
+          slug: "custom-model",
+          name: "Custom model",
+          isCustom: true,
+          capabilities: null,
+        } as const;
+        const refreshedProvider = {
+          ...cachedProvider,
+          checkedAt: "2026-09-04T19:01:00.000Z",
+          models: cachedProvider.models.slice(0, 4),
+        } satisfies ServerProvider;
+        // `buildInitialGrokProviderSnapshot` seeds the built-in model plus the
+        // user's custom rows before the first probe has run.
+        const bootModels = [
+          { slug: "grok-build", name: "Grok Build", isCustom: false, capabilities: null },
+          customModel,
+        ];
+        const pendingProvider = {
+          ...cachedProvider,
+          version: null,
+          status: "warning",
+          installed: false,
+          auth: { status: "unknown" },
+          models: bootModels,
+        } satisfies ServerProvider;
+        const failedProvider = {
+          ...pendingProvider,
+          checkedAt: "2026-09-04T19:02:00.000Z",
+          installed: true,
+          version: "0.4.2",
+          status: "error",
+        } satisfies ServerProvider;
+
+        it("drops removed gateway models after discovery, with or without authentication", () => {
+          for (const authStatus of ["authenticated", "unknown"] as const) {
+            assert.deepStrictEqual(
+              mergeProviderSnapshot(cachedProvider, {
+                ...refreshedProvider,
+                auth: { status: authStatus },
+              }).models,
+              refreshedProvider.models,
+            );
+          }
+        });
+
+        it("drops removed gateway models after the gateway disconnects", () => {
+          const disconnectedProvider = {
+            ...refreshedProvider,
+            status: "error",
+            installed: true,
+            auth: { status: "unauthenticated" },
+          } satisfies ServerProvider;
+
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(cachedProvider, disconnectedProvider).models,
+            refreshedProvider.models,
+          );
+        });
+
+        it("drops removed gateway models when only the ACP probe failed", () => {
+          // Grok reports the same warning/unknown pair at boot and after a failed
+          // ACP handshake, but only the latter carries an authoritative model list.
+          const acpFailureProvider = {
+            ...refreshedProvider,
+            status: "warning",
+            installed: true,
+            version: "0.4.2",
+            auth: { status: "unknown" },
+          } satisfies ServerProvider;
+
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(cachedProvider, acpFailureProvider).models,
+            refreshedProvider.models,
+          );
+        });
+
+        it("keeps cached models during the pending initial probe and failed probes without restoring removed custom models", () => {
+          for (const provider of [pendingProvider, failedProvider]) {
+            assert.deepStrictEqual(
+              mergeProviderSnapshot(
+                {
+                  ...cachedProvider,
+                  models: [...cachedProvider.models, { ...customModel, slug: "removed-custom" }],
+                },
+                provider,
+              ).models,
+              [...bootModels, ...cachedProvider.models],
+            );
+          }
+        });
+
+        it("clears discovered models after sign-out, disable, uninstall, or empty discovery", () => {
+          const emptyProvider = { ...refreshedProvider, models: [customModel] };
+          const clearedProviders = [
+            { ...emptyProvider, status: "error", auth: { status: "unauthenticated" } },
+            { ...emptyProvider, status: "disabled", enabled: false },
+            { ...emptyProvider, status: "error", installed: false, auth: { status: "unknown" } },
+            emptyProvider,
+            { ...emptyProvider, models: [] },
+          ] satisfies ReadonlyArray<ServerProvider>;
+
+          for (const provider of clearedProviders) {
+            assert.deepStrictEqual(
+              mergeProviderSnapshot(cachedProvider, provider).models,
+              provider.models,
+            );
+          }
+        });
+      });
+
       describe("Antigravity model inventories", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("antigravity-personal"),
