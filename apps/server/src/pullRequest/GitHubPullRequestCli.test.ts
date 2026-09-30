@@ -313,9 +313,9 @@ it.effect("keeps two credentials' summaries out of one batched read", () =>
   Effect.gen(function* () {
     const tokens: Record<string, string> = { "/w/org-a": "token-a", "/w/org-b": "token-b" };
     const commands: VcsProcess.VcsProcessInput[] = [];
-    // The two org-a reads have to overlap at the token read or there is no in-flight window to
-    // coalesce and the call-count assertion proves nothing. Holding the first one open makes the
-    // overlap explicit: the second must join this lookup rather than start its own.
+    // Holding the first org-a token read open keeps both org-a reads inside one batch window, so
+    // they have to arrive at the batcher together. Without the hold the second read could land in
+    // a later window and the document assertions below would pass for the wrong reason.
     const tokenReadStarted = yield* Deferred.make<void>();
     const releaseTokenRead = yield* Deferred.make<void>();
     let heldTokenReads = 0;
@@ -362,12 +362,13 @@ it.effect("keeps two credentials' summaries out of one batched read", () =>
         cli.getPullRequestSummary({ cwd, repository: "acme/web", host: "github.com", number }),
       );
     // The first org-a read parks inside its token lookup, so the second read in the same
-    // workspace overlaps it and has to join the in-flight lookup instead of asking again.
+    // workspace is already waiting when the first is released. That is what puts both in one
+    // batch window instead of two.
     const sevenFiber = yield* readSummary("/w/org-a", 7).pipe(Effect.forkChild);
     yield* Deferred.await(tokenReadStarted);
     const nineFiber = yield* readSummary("/w/org-a", 9).pipe(Effect.forkChild);
-    // Required, not optional: the second read still has to reach the shared lookup and suspend
-    // on it, or the release would land before it entered the map and the run would be racy.
+    // Required, not optional: the second read still has to reach its own lookup and suspend on
+    // it, or the release would land before it parked and the run would be racy.
     yield* Effect.yieldNow;
     yield* Deferred.succeed(releaseTokenRead, undefined);
     // Forked last so the two org-a reads reach the batcher first. That is the order the
@@ -402,11 +403,12 @@ it.effect("keeps two credentials' summaries out of one batched read", () =>
     expect(documentB).not.toContain("number: 9");
     expect([forOrgA.cwd, forOrgB.cwd]).toEqual(["/w/org-a", "/w/org-b"]);
     expect([forOrgA.env?.GH_TOKEN, forOrgB.env?.GH_TOKEN]).toEqual(["token-a", "token-b"]);
-    // Pinning costs one `gh auth token` per workspace, not one per read: the sweep asks for
-    // twenty-five pull requests a minute and would otherwise trade a batched read for a spawn.
+    // One `gh auth token` per read, each under its own workspace. Sharing a single in-flight
+    // read across readers was reverted; see the note in captureVerifiedCredential. The sweep pays
+    // a spawn per read so that cancelling one read cannot take the others down with it.
     assert.deepStrictEqual(
       commands.filter((command) => command.args[0] === "auth").map((command) => command.cwd),
-      ["/w/org-a", "/w/org-b"],
+      ["/w/org-a", "/w/org-a", "/w/org-b"],
     );
     assert.strictEqual(seven?.number, 7);
     assert.strictEqual(seven?.headBranch, "feat/7");

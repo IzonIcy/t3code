@@ -1106,53 +1106,8 @@ export const make = Effect.gen(function* () {
       }),
     ),
   );
-  const pendingTokens = new Map<string, Effect.Effect<string, GitHubViewerLoginUnavailableError>>();
   const unavailable = (cwd: string) =>
     new GitHubViewerLoginUnavailableError({ command: "gh", cwd });
-  // One `gh auth token` spawn per in-flight read, not per reader. The summary sweep asks for
-  // every linked pull request at concurrency 25, so without this a host with 25 of them spawned
-  // 25 processes a minute. Coalescing only the in-flight read keeps staleness bounded by the
-  // spawn: a sequential capture always re-resolves, so an `gh auth switch` is still observed.
-  const resolveToken = Effect.fn("GitHubPullRequestCli.resolveToken")(function* (input: {
-    readonly cwd: string;
-    readonly host: string;
-  }) {
-    const fail = () => unavailable(input.cwd);
-    const host = input.host.toLowerCase();
-    const key = `${host}\0${input.cwd}`;
-    const held = pendingTokens.get(key);
-    // Effect.cached is load-bearing: storing a bare Effect would let every fiber run it again.
-    // The spawn is uninterruptible because cached runs it inline in the first reader's fiber —
-    // interrupting that leader would otherwise publish an interrupt into the memo and fail the
-    // peers that only joined it, none of whom was cancelled. Peers get the value; only the
-    // cancelled reader loses, and the cost is bounded by `gh`'s own timeout.
-    const read =
-      held ??
-      (yield* Effect.cached(
-        Effect.uninterruptible(
-          github
-            .execute({
-              cwd: input.cwd,
-              args: ["auth", "token", "--hostname", host],
-              env: { GH_DEBUG: "" },
-            })
-            .pipe(
-              Effect.mapError(fail),
-              Effect.map((result) => result.stdout.trim()),
-            ),
-        ),
-      ));
-    pendingTokens.set(key, read);
-    return yield* read.pipe(
-      // Runs on success, failure and interruption, so neither a rejected read nor a cancelled
-      // reader can leave an entry behind for the next sweep to trust.
-      Effect.ensuring(
-        Effect.sync(() => {
-          if (pendingTokens.get(key) === read) pendingTokens.delete(key);
-        }),
-      ),
-    );
-  });
   const captureVerifiedCredential = Effect.fn("GitHubPullRequestCli.captureVerifiedCredential")(
     function* (input: { readonly cwd: string; readonly host: string }) {
       const fail = () => unavailable(input.cwd);
@@ -1160,7 +1115,22 @@ export const make = Effect.gen(function* () {
       const pinned = yield* GitHubCli.PinnedGitHubCredential;
       if (pinned !== null && pinned.host !== host) return yield* fail();
       // Only the digest is retained. Never attach credential lookup output to an error.
-      const token = pinned !== null ? Redacted.value(pinned.token) : yield* resolveToken(input);
+      // No memoized token here on purpose. Sharing one in-flight `gh auth token` read across
+      // readers was tried and reverted: `Effect.cached` runs its computation inline in the first
+      // reader's fiber and replays that reader's interrupted exit to everyone waiting on it, so
+      // cancelling any single read failed every other read sharing the lookup — and it happens
+      // outside the request resolver, so those reads stop rather than error. Each reader spawns
+      // its own token read, which is the cost the sweep pays to stay correct.
+      const token =
+        pinned !== null
+          ? Redacted.value(pinned.token)
+          : (yield* github
+              .execute({
+                cwd: input.cwd,
+                args: ["auth", "token", "--hostname", host],
+                env: { GH_DEBUG: "" },
+              })
+              .pipe(Effect.mapError(fail))).stdout.trim();
       if (!token) return yield* fail();
       const key = `${host}:${NodeCrypto.createHash("sha256").update(token).digest("hex")}`;
       const credential = { host, token: Redacted.make(token), credentialFingerprint: key };
