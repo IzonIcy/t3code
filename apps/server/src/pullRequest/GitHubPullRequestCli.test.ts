@@ -79,6 +79,30 @@ function output(stdout: string, stdoutTruncated = false, stdoutInvalidUtf8 = fal
   };
 }
 
+/** The row one `PullRequestSummaries` alias returns for a pull request. */
+function summaryNode(number: number) {
+  return {
+    number,
+    title: `Pull request ${number}`,
+    url: `https://github.com/acme/web/pull/${number}`,
+    author: { __typename: "User", login: "octocat", name: "Octo Cat", avatarUrl: null },
+    baseRefName: "main",
+    headRefName: `feat/${number}`,
+    state: "OPEN",
+    isDraft: false,
+    mergeable: "MERGEABLE",
+    reviewDecision: null,
+    latestReviews: { nodes: [] },
+    additions: 12,
+    deletions: 3,
+    changedFiles: 2,
+    updatedAt: "2026-08-24T12:34:56.000Z",
+    mergedAt: null,
+    closedAt: null,
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+  };
+}
+
 function pullRequests(
   count: number,
   firstNumber: number,
@@ -283,6 +307,114 @@ it.effect(
         viewer: "same-account",
       });
     }),
+);
+
+it.effect("keeps two credentials' summaries out of one batched read", () =>
+  Effect.gen(function* () {
+    const tokens: Record<string, string> = { "/w/org-a": "token-a", "/w/org-b": "token-b" };
+    const commands: VcsProcess.VcsProcessInput[] = [];
+    // The two org-a reads have to overlap at the token read or there is no in-flight window to
+    // coalesce and the call-count assertion proves nothing. Holding the first one open makes the
+    // overlap explicit: the second must join this lookup rather than start its own.
+    const tokenReadStarted = yield* Deferred.make<void>();
+    const releaseTokenRead = yield* Deferred.make<void>();
+    let heldTokenReads = 0;
+    const github = yield* GitHubCli.make.pipe(
+      Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer)),
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) =>
+          Effect.gen(function* () {
+            commands.push(input);
+            if (input.args[0] === "auth") {
+              if (input.cwd === "/w/org-a" && heldTokenReads++ === 0) {
+                yield* Deferred.succeed(tokenReadStarted, undefined);
+                yield* Deferred.await(releaseTokenRead);
+              }
+              return output(tokens[input.cwd] ?? "token-a");
+            }
+            if (input.args[1] === "user")
+              return output(
+                encodeJson({
+                  id: input.cwd === "/w/org-a" ? 101 : 202,
+                  login: input.cwd === "/w/org-a" ? "octocat" : "hubot",
+                }),
+              );
+            // Answer each alias the document asked for, so a batch that wrongly swallowed the
+            // other workspace's read still files both results and the assertion has to be the
+            // call count rather than the payload.
+            const document = input.args.at(-1) ?? "";
+            const data: Record<string, unknown> = {};
+            for (const alias of document.matchAll(
+              /s(\d+): repository\(owner: "[^"]+", name: "[^"]+"\) \{ pullRequest\(number: (\d+)\)/g,
+            ))
+              data[`s${alias[1]}`] = { pullRequest: summaryNode(Number(alias[2])) };
+            return output(encodeJson({ data }));
+          }),
+      }),
+    );
+    const cli = yield* GitHubPullRequestCli.make.pipe(
+      Effect.provideService(GitHubCli.GitHubCli, github),
+      Effect.provide(GitHubGraphQlBudget.layer),
+    );
+
+    const readSummary = (cwd: string, number: number) =>
+      cli.withVerifiedCredential({ cwd, host: "github.com" }, () =>
+        cli.getPullRequestSummary({ cwd, repository: "acme/web", host: "github.com", number }),
+      );
+    // The first org-a read parks inside its token lookup, so the second read in the same
+    // workspace overlaps it and has to join the in-flight lookup instead of asking again.
+    const sevenFiber = yield* readSummary("/w/org-a", 7).pipe(Effect.forkChild);
+    yield* Deferred.await(tokenReadStarted);
+    const nineFiber = yield* readSummary("/w/org-a", 9).pipe(Effect.forkChild);
+    // Required, not optional: the second read still has to reach the shared lookup and suspend
+    // on it, or the release would land before it entered the map and the run would be racy.
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(releaseTokenRead, undefined);
+    // Forked last so the two org-a reads reach the batcher first. That is the order the
+    // assertions below read the documents in, and a real sweep is racy anyway.
+    const eightFiber = yield* readSummary("/w/org-b", 8).pipe(Effect.forkChild);
+    yield* TestClock.adjust("10 millis");
+    const [seven, nine, eight] = yield* Effect.all([
+      Fiber.join(sevenFiber),
+      Fiber.join(nineFiber),
+      Fiber.join(eightFiber),
+    ]);
+
+    const graphqlCalls = commands.filter(
+      (command) => command.args[0] === "api" && command.args[1] === "graphql",
+    );
+    // The batch key carries the credential, so two accounts are two documents. One document
+    // would send one workspace's pull request to the other workspace's token.
+    assert.strictEqual(graphqlCalls.length, 2);
+    const [forOrgA, forOrgB] = graphqlCalls;
+    assert.isDefined(forOrgA);
+    assert.isDefined(forOrgB);
+    const documentA = forOrgA.args.at(-1) ?? "";
+    const documentB = forOrgB.args.at(-1) ?? "";
+    // Alias order is deliberately not asserted. The two org-a reads now overlap at the token
+    // read, so which one reaches the batcher first is a scheduling race, and the batcher
+    // numbers aliases in arrival order.
+    expect(documentA).toContain('repository(owner: "acme", name: "web") { pullRequest(number: 7)');
+    expect(documentA).toContain("pullRequest(number: 9)");
+    expect(documentA).not.toContain("number: 8");
+    expect(documentB).toContain("pullRequest(number: 8)");
+    expect(documentB).not.toContain("number: 7");
+    expect(documentB).not.toContain("number: 9");
+    expect([forOrgA.cwd, forOrgB.cwd]).toEqual(["/w/org-a", "/w/org-b"]);
+    expect([forOrgA.env?.GH_TOKEN, forOrgB.env?.GH_TOKEN]).toEqual(["token-a", "token-b"]);
+    // Pinning costs one `gh auth token` per workspace, not one per read: the sweep asks for
+    // twenty-five pull requests a minute and would otherwise trade a batched read for a spawn.
+    assert.deepStrictEqual(
+      commands.filter((command) => command.args[0] === "auth").map((command) => command.cwd),
+      ["/w/org-a", "/w/org-b"],
+    );
+    assert.strictEqual(seven?.number, 7);
+    assert.strictEqual(seven?.headBranch, "feat/7");
+    assert.strictEqual(eight?.number, 8);
+    assert.strictEqual(eight?.headBranch, "feat/8");
+    assert.strictEqual(nine?.number, 9);
+    assert.strictEqual(nine?.headBranch, "feat/9");
+  }),
 );
 
 layer("GitHubPullRequestCli.layer", (it) => {

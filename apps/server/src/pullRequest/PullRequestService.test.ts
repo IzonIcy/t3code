@@ -4347,6 +4347,41 @@ it.effect("keeps routed reads separate when the GitHub account changes", () =>
   }),
 );
 
+it.effect("reads a summary under the credential its own workspace resolves", () =>
+  Effect.gen(function* () {
+    const pins: Array<{ readonly cwd: string; readonly host: string }> = [];
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          withVerifiedCredential: (input, use) =>
+            Effect.suspend(() => {
+              pins.push(input);
+              return use({
+                accountId: "101",
+                viewer: "octocat",
+                credentialFingerprint: "cred-a",
+              });
+            }),
+          getChangeRequestSummary: () => Effect.succeed(hostedChangeRequest("summary")),
+        }),
+      ],
+    });
+
+    const result = yield* service.summary({
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 1,
+      host: "github.com",
+    });
+
+    assert.strictEqual(result.title, "Change request 1");
+    // The sweep reads every project together, so an unpinned read inherits whichever
+    // workspace happened to open the batch and answers as that account.
+    assert.deepStrictEqual(pins, [{ cwd: "/a", host: "github.com" }]);
+  }),
+);
+
 it.effect("isolates routed caches for two credentials belonging to the same account", () =>
   Effect.gen(function* () {
     for (const operation of ["summary", "detail", "diff", "preview", "filesViewed"] as const) {

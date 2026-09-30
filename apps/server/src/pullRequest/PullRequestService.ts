@@ -1559,7 +1559,17 @@ export const make = Effect.gen(function* () {
           project.api.getChangeRequestSummary === undefined
             ? project.api.getChangeRequest(providerInput)
             : project.api.getChangeRequestSummary(providerInput);
-        return read.pipe(
+        // Pin to the credential this workspace resolves. The sweep reads every project together,
+        // so an unpinned read joins a batch opened by whichever workspace got there first and
+        // answers as that account instead of this project's own.
+        const verified =
+          project.api.withVerifiedCredential === undefined
+            ? read
+            : project.api.withVerifiedCredential(
+                { cwd: providerInput.cwd, host: providerInput.host },
+                () => read,
+              );
+        return verified.pipe(
           Effect.mapError(toPullRequestError("summary")),
           observeRead,
           Effect.map(({ value: changeRequest, observedAt }): PullRequestSummary => ({
