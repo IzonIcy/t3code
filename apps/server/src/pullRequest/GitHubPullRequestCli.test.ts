@@ -392,8 +392,8 @@ it.effect("keeps two credentials' summaries out of one batched read", () =>
     assert.isDefined(forOrgB);
     const documentA = forOrgA.args.at(-1) ?? "";
     const documentB = forOrgB.args.at(-1) ?? "";
-    // Alias order is deliberately not asserted. The two org-a reads now overlap at the token
-    // read, so which one reaches the batcher first is a scheduling race, and the batcher
+    // Alias order is deliberately not asserted. The two org-a reads are both waiting when the
+    // hold releases, so which one reaches the batcher first is a scheduling race, and the batcher
     // numbers aliases in arrival order.
     expect(documentA).toContain('repository(owner: "acme", name: "web") { pullRequest(number: 7)');
     expect(documentA).toContain("pullRequest(number: 9)");
