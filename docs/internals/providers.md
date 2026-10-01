@@ -102,6 +102,18 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
+## Codex turn parameters override the session
+
+Codex documents `sandboxPolicy`, `approvalPolicy`, and `approvalsReviewer` on `turn/start` as
+overriding the policy "for this turn and subsequent turns", and it defaults a missing
+`networkAccess` to `false` and `writableRoots` to `[]`. Sending any of them on every turn replaces
+the thread policy built from the user's launch arguments, so the `-c` settings a user enters in
+T3's Launch arguments stop taking effect in sandboxed modes.
+
+Apply the runtime mode when the session starts or resumes and let the session own it from there.
+`thread/settings/update` does not exist in the generated client, so a mid-session mode change has to
+restart the session, which `ProviderCommandReactor` already does.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)
