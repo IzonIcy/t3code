@@ -91,6 +91,15 @@ Runtime receipts mark specific test milestones. Their
 production behavior must use persisted state and events. These test signals are separate from the
 durable command receipts that make dispatch idempotent.
 
+`Effect.cached` shares one computation across fibers, but it runs that computation inline in the
+first caller's fiber and publishes that caller's exit to everyone waiting on it. Cancel that caller
+and every joiner fails with its interrupt, even though only the first caller was cancelled.
+`Effect.uninterruptible` around the body does not change this: it keeps the underlying work from
+being torn out, not the memo from recording the interrupt. A read that independent requests join
+must therefore fork its own work per reader, or memoize a detached fiber that each reader joins
+separately. Note that a detached fiber is not driven under `TestClock`, so the second shape hangs
+`it.effect` and cannot be verified there as written.
+
 The Electron shell acquires `DesktopPreReadyPlatform.layer` synchronously before asynchronous
 services. On Linux this sets the desktop-entry identity and global-shortcut portal flags before
 Chromium initializes its portal connection. Setting the identity later in `DesktopAppIdentity`
