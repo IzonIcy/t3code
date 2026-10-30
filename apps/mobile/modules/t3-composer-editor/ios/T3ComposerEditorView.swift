@@ -444,6 +444,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private var tokensNeedRebuild = false
   private var chipsNeedMeasuredWidth = false
   private var hasDeferredForcedRebuild = false
+  private var hasDeferredControlledReplacement = false
   private var pendingContentOffset: CGPoint?
   private var needsSelectionReveal = false
   private var selectionBeforeFocusingTap: (selection: ComposerSelectionPayload, value: String)?
@@ -781,6 +782,14 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   }
 
   public func textViewDidChange(_ textView: UITextView) {
+    // A replacement that could not commit its composition is still pending:
+    // applying the stored value must win over emitting the committed text.
+    if hasDeferredControlledReplacement {
+      if textView.markedTextRange == nil {
+        applyControlledDocument()
+      }
+      return
+    }
     emitTextChange()
   }
 
@@ -876,6 +885,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       isApplyingControlledValue = false
       // A failed commit must not write attributed text under a live composition.
       guard textView.markedTextRange == nil else {
+        hasDeferredControlledReplacement = true
         hasDeferredForcedRebuild = true
         updatePlaceholderVisibility()
         return
@@ -888,6 +898,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       return
     }
     hasDeferredForcedRebuild = false
+    hasDeferredControlledReplacement = false
 
     let previousSelection = sourceSelection()
     if textView.isScrollEnabled {
